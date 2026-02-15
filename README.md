@@ -1,0 +1,1 @@
+# amd_garbage_recognizer
