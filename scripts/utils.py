@@ -7,9 +7,11 @@ import itertools
 import pickle
 
 from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
+from keras.callbacks import EarlyStopping
+from keras import mixed_precision
+
 from collections import Counter
 import tensorflow as tf
-
 
 image_size = (32,32)
 num_classes = 10
@@ -105,32 +107,20 @@ def table_from_history(history_table, run_id):
     return dft 
 
 
-def pass_batchs_to_arrays(dset, pass_dummy = False):
-    '''Takes a TensorFlow dataset and converts it to its respective features and labels arrays.
-    
-    Args:
-        - dset: tensorflow dataset.
-        - pass_dummy (bool): sets if labels should be returned in a one-hot format.
-        
-    Returns:
-        - X (np.array): features dataset.
-        - y (np.array): labels dataset.
-    
-    '''
-
+def pass_batchs_to_arrays(dset, pass_dummy=False):
     X_list = []
     y_list = []
 
-    for x_batch, y_batch in dset:
-        X_list.append(x_batch.numpy())
-        y_list.append(y_batch.numpy())
+    for x_batch, y_batch in dset.as_numpy_iterator():
+        X_list.append(x_batch)
+        y_list.append(y_batch)
 
     X = np.concatenate(X_list, axis=0)
     y = np.concatenate(y_list, axis=0)
-    
+
     if pass_dummy:
-        y = np.argmax(y, axis = 1)
-    
+        y = np.argmax(y, axis=1)
+
     return X, y
 
 
@@ -198,7 +188,8 @@ def evaluate_combination(i_p, params, X_train_paths, y_train_array, skf, build_m
         run_id, run_logdir = get_run_logdir("first_architecture", f"ip_{i_p}_{fold}")
 
         # Train
-        history = model.fit(train_ds, validation_data=val_ds, epochs=30, verbose=0, class_weight=class_weights)
+        early_stopping = EarlyStopping(patience = 5, restore_best_weights=True)
+        history = model.fit(train_ds, validation_data=val_ds, epochs=15, verbose=0, class_weight=class_weights, callbacks = [early_stopping])
 
         history_tables.append(table_from_history(history.history, run_id))
 
