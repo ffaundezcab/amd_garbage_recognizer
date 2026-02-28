@@ -27,6 +27,7 @@ class_weights = {0: np.float64(1.6402457757296467),
  8: np.float64(0.8176110260336906),
  9: np.float64(2.7032911392405063)}
 
+logs_path = "C:/Users/faarc/OneDrive/Escritorio/Uni/5th Trimester/Algorithms for massiva Data/amd_garbage_recognizer/notebooks/logs"
 
 def count_label_distribution(dset):
     '''Takes a TensorFlow dataset and counts how many observations for each label are present. 
@@ -189,7 +190,7 @@ def evaluate_combination(i_p, params, X_train_paths, y_train_array, skf, build_m
 
         # Train
         early_stopping = EarlyStopping(patience = 5, restore_best_weights=True)
-        history = model.fit(train_ds, validation_data=val_ds, epochs=15, verbose=0, class_weight=class_weights, callbacks = [early_stopping])
+        history = model.fit(train_ds, validation_data=val_ds, epochs=20, verbose=0, class_weight=class_weights, callbacks = [early_stopping])
 
         history_tables.append(table_from_history(history.history, run_id))
 
