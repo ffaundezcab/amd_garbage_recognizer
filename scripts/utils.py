@@ -6,10 +6,13 @@ import numpy as np
 import itertools
 import pickle
 import time
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
 from keras.callbacks import EarlyStopping
 from keras import mixed_precision
+from sklearn.metrics import confusion_matrix, classification_report
 
 from collections import Counter
 import tensorflow as tf
@@ -73,7 +76,7 @@ def root_logdir(architecture_name):
         - Path for the logs of execution to be saved.
     
     '''
-    return os.path.join(os.curdir, "logs\\"+architecture_name)
+    return os.path.join(os.curdir, "logs/"+architecture_name)
 
 def get_run_logdir(architecture_name, it):
     '''Creates a run id by adding a timestamp to the execution path of each log to better trace each training session.
@@ -125,6 +128,22 @@ def pass_batchs_to_arrays(dset, pass_dummy=False):
 
     return X, y
 
+def load_full_dataset(paths, labels):
+    ds = tf.data.Dataset.from_tensor_slices((paths, labels))
+    ds = ds.map(preprocess_image, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.batch(1024)
+    
+    images = []
+    targets = []
+    
+    for batch_images, batch_labels in ds:
+        images.append(batch_images)
+        targets.append(batch_labels)
+        
+    X = tf.concat(images, axis=0)
+    y = tf.concat(targets, axis=0)
+    
+    return X, y
 
 # pass thru tf to convert paths to images
 def preprocess_image(file_path, label):
@@ -255,8 +274,15 @@ def CNN_GridSearchCV(X_train_paths, y_train_array, param_grid, build_model, rand
     best_params = best_result['params']
     best_accuracy = best_result['val_accuracy']
     mean_scores = [(r['val_loss'], r['val_accuracy']) for r in results]
+    
+    params_results = pd.DataFrame([
+    {**r['params'], 
+     'val_loss': r['val_loss'], 
+     'val_accuracy': r['val_accuracy']}
+        for r in results
+        ])
 
-    return best_params, best_accuracy, mean_scores
+    return best_params, best_accuracy, mean_scores, params_results
 
 
 def save_params(run_logdir, name, best_params):
@@ -268,7 +294,7 @@ def save_params(run_logdir, name, best_params):
         - best_params (dict): dictionary to be saved.
     
     '''
-    with open(run_logdir + '\\' + name, 'wb') as f:
+    with open(run_logdir + '/' + name, 'wb') as f:
         pickle.dump(best_params, f)
         
 def load_params(run_logdir):
@@ -285,3 +311,41 @@ def load_params(run_logdir):
         loaded_params = pickle.load(f)
     
     return loaded_params 
+
+
+def compute_classification_metrics(y_true, y_pred, class_names):
+    '''Computes confusion matrix based on prediction and true labels.
+    
+    Args:
+        - y_true (np.array): true labels of a dataset.
+        - y_pred (np.array): predicted labels.
+        - class_names (list): index-ordered class names.
+        
+    Returns:
+        - cm: confusion matrix.
+        - Also prints a classification report.
+    
+    '''
+    cm = confusion_matrix(y_true, y_pred)
+    str_summary = classification_report(y_true, y_pred, target_names=class_names)
+    print(str_summary)
+    
+    # todo: manually compute other metrics
+    return cm
+
+
+def plot_conf_matrix(cm, class_names):
+    ''' Plots a confusion matrix coming from the compute_classification_metrics function
+    
+    Args:
+        - cm: confusion matrix.
+    Returns:
+        - Plot of the confusion matrix.
+        
+    '''
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", 
+                xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel("pred")
+    plt.ylabel("true")
+    plt.show()
