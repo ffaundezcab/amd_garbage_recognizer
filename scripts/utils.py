@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import itertools
 import pickle
+import time
 
 from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
 from keras.callbacks import EarlyStopping
@@ -27,6 +28,7 @@ class_weights = {0: np.float64(1.6402457757296467),
  8: np.float64(0.8176110260336906),
  9: np.float64(2.7032911392405063)}
 
+mixed_precision.set_global_policy('mixed_float16')
 logs_path = "C:/Users/faarc/OneDrive/Escritorio/Uni/5th Trimester/Algorithms for massiva Data/amd_garbage_recognizer/notebooks/logs"
 
 def count_label_distribution(dset):
@@ -84,7 +86,6 @@ def get_run_logdir(architecture_name, it):
         - run_id (str): combination of architecture number and timestamp.
         - new_path (str): updated log path with run_id.
     '''
-    import time
     run_id = str(it) +"_"+ time.strftime("run_%Y_%m_%d-%H_%M_%S")
     new_path = os.path.join(root_logdir(architecture_name), run_id)
     
@@ -146,7 +147,7 @@ def preprocess_image(file_path, label):
     img = tf.image.resize(img, image_size)
     return img, tf.one_hot(label, depth=num_classes)
 
-def evaluate_combination(i_p, params, X_train_paths, y_train_array, skf, build_model, batch_size=32):
+def evaluate_combination(i_p, params, X_train, y_train, skf, build_model, batch_size=128):
     """
     Args:
         i_p (int): index of the hyperparameter combination
@@ -162,42 +163,46 @@ def evaluate_combination(i_p, params, X_train_paths, y_train_array, skf, build_m
     """
     
     history_tables = []
+    
+    print(f"combination {i_p}")
+    print(f"Params: {params}")
+    start_comb = time.time()
 
-    print(f"params: {params}")
-    print("-" * 10)
-
-    for i, (train_i, val_i) in enumerate(skf.split(X_train_paths, y_train_array)):
+    for i, (train_i, val_i) in enumerate(skf.split(X_train, y_train)):
         fold = f"Fold{i+1}"
         
-        # Split paths and labels
-        train_paths, val_paths = X_train_paths[train_i], X_train_paths[val_i]
-        y_train, y_val = y_train_array[train_i], y_train_array[val_i]
+        # y_train_fold = tf.one_hot(y_train[train_i], depth=num_classes)
+        train_ds = tf.data.Dataset.from_tensor_slices(
+                (X_train[train_i], y_train[train_i])
+            ).shuffle(len(train_i)).batch(batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
 
-        # Build tf.data datasets (lazy loading)
-        train_ds = tf.data.Dataset.from_tensor_slices((train_paths, y_train))
-        train_ds = train_ds.map(preprocess_image, num_parallel_calls=tf.data.AUTOTUNE)
-        train_ds = train_ds.shuffle(1000).batch(batch_size).prefetch(tf.data.AUTOTUNE)
-
-        val_ds = tf.data.Dataset.from_tensor_slices((val_paths, y_val))
-        val_ds = val_ds.map(preprocess_image, num_parallel_calls=tf.data.AUTOTUNE)
-        val_ds = val_ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
-
-        # Build model
+        # y_val_fold = tf.one_hot(y_train[val_i], depth=num_classes)
+        val_ds = tf.data.Dataset.from_tensor_slices(
+            (X_train[val_i], y_train[val_i])
+        ).batch(batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
+        
+        tf.keras.backend.clear_session()
         model = build_model(**params)
 
-        # Logging
         run_id, run_logdir = get_run_logdir("first_architecture", f"ip_{i_p}_{fold}")
 
-        # Train
-        early_stopping = EarlyStopping(patience = 5, restore_best_weights=True)
-        history = model.fit(train_ds, validation_data=val_ds, epochs=20, verbose=0, class_weight=class_weights, callbacks = [early_stopping])
+        # train
+        # print("training")
+        start_fold = time.time()
+        early_stopping = EarlyStopping(patience = 3, restore_best_weights=True)
+        history = model.fit(train_ds, 
+                            validation_data=val_ds, 
+                            epochs=15, verbose=0, 
+                            class_weight=class_weights, 
+                            callbacks = [early_stopping])
+        
+        fold_time = time.time() - start_fold
+        # print(f"[{fold}] time: {fold_time:.1f}")
 
         history_tables.append(table_from_history(history.history, run_id))
 
-    # Combine fold histories
     df_history = pd.concat(history_tables)
 
-    # Fix: drop index to avoid inserting duplicate 'run' column
     best_train_val = df_history.groupby('run').apply(
         lambda x: x.loc[x["val_loss"].idxmin()]
     ).reset_index(drop=True)
@@ -232,27 +237,23 @@ def CNN_GridSearchCV(X_train_paths, y_train_array, param_grid, build_model, rand
         best_params, best_accuracy, mean_scores
     """
 
-    # Stratified K-Fold
     skf = StratifiedKFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
 
-    # All hyperparameter combinations
     param_combinations = [
         dict(zip(param_grid.keys(), values))
         for values in itertools.product(*param_grid.values())
     ]
-
-    # Evaluate combinations (parallelized)
-    results = Parallel(n_jobs=n_jobs)(
-        delayed(evaluate_combination)(i, params, X_train_paths, y_train_array, skf, build_model, batch_size)
-        for i, params in enumerate(param_combinations)
-    )
-
-    # Pick best combination
+    total_start = time.time()
+    results = []
+    for i, params in enumerate(param_combinations):
+        result = evaluate_combination(i, params, X_train_paths, y_train_array, skf, build_model, batch_size)
+        results.append(result)
+        
+    total_time = time.time() - total_start
+    # print(f"tot_time: {total_time:.1f}")
     best_result = max(results, key=lambda r: r['val_accuracy'])
     best_params = best_result['params']
     best_accuracy = best_result['val_accuracy']
-
-    # Save all scores
     mean_scores = [(r['val_loss'], r['val_accuracy']) for r in results]
 
     return best_params, best_accuracy, mean_scores
