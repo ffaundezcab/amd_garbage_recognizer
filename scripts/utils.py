@@ -12,7 +12,7 @@ import seaborn as sns
 from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
 from keras.callbacks import EarlyStopping
 from keras import mixed_precision
-from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.metrics import confusion_matrix, classification_report, f1_score, balanced_accuracy_score, precision_score, recall_score, accuracy_score
 
 from collections import Counter
 import tensorflow as tf
@@ -185,56 +185,85 @@ def evaluate_combination(i_p, params, X_train, y_train, skf, build_model, batch_
     
     print(f"combination {i_p}")
     print(f"Params: {params}")
-    start_comb = time.time()
+    # start_comb = time.time()
 
     for i, (train_i, val_i) in enumerate(skf.split(X_train, y_train)):
         fold = f"Fold{i+1}"
         
-        # y_train_fold = tf.one_hot(y_train[train_i], depth=num_classes)
+        # train
         train_ds = tf.data.Dataset.from_tensor_slices(
                 (X_train[train_i], y_train[train_i])
             ).shuffle(len(train_i)).batch(batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
 
-        # y_val_fold = tf.one_hot(y_train[val_i], depth=num_classes)
+        # val
         val_ds = tf.data.Dataset.from_tensor_slices(
             (X_train[val_i], y_train[val_i])
         ).batch(batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
         
+        # CLEAR PREVIOUS MODELS
         tf.keras.backend.clear_session()
+        
+        # build model
         model = build_model(**params)
-
+        # get id
         run_id, run_logdir = get_run_logdir("first_architecture", f"ip_{i_p}_{fold}")
 
         # train
-        # print("training")
-        start_fold = time.time()
+        # start_fold = time.time()
         early_stopping = EarlyStopping(patience = 3, restore_best_weights=True)
-        history = model.fit(train_ds, 
-                            validation_data=val_ds, 
-                            epochs=15, verbose=0, 
-                            class_weight=class_weights, 
-                            callbacks = [early_stopping])
+        model.fit(train_ds, 
+                    validation_data=val_ds, 
+                    epochs=15, verbose=0, 
+                    class_weight=class_weights, 
+                    callbacks = [early_stopping])
         
-        fold_time = time.time() - start_fold
+        # pred using trained model
+        y_val_true = y_train[val_i]
+        y_val_pred_prob = model.predict(val_ds, verbose=0)
+        y_val_pred = np.argmax(y_val_pred_prob, axis=1)
+
+        # new metrics considering imbalanced dataset
+        macro_f1 = f1_score(y_val_true, y_val_pred, average='macro')
+        baccuracy = balanced_accuracy_score(y_val_true,y_val_pred)
+        # ZERO DIVISION, AVOID ERROR
+        macro_precision = precision_score(y_val_true, y_val_pred,  average='macro', zero_division=0)
+        macro_recall = recall_score(y_val_true, y_val_pred, average='macro', zero_division=0)
+        
+        # normal accuracy, check how different it is to choose f1 instead of acc
+        accuracy = accuracy_score(y_val_true,y_val_pred)
+        
+        # fold_time = time.time() - start_fold
         # print(f"[{fold}] time: {fold_time:.1f}")
 
-        history_tables.append(table_from_history(history.history, run_id))
+        history_tables.append(
+                            pd.DataFrame({
+                                "run": [run_id],
+                                "fold": [i+1],
+                                "val_macro_f1": [macro_f1],
+                                "val_bacc": [baccuracy],
+                                "val_macro_precision": [macro_precision],
+                                "val_macro_recall": [macro_recall],
+                                "val_accuracy": [accuracy]
+                            })
+                        )
 
-    df_history = pd.concat(history_tables)
+    df_metrics = pd.concat(history_tables)
 
-    best_train_val = df_history.groupby('run').apply(
-        lambda x: x.loc[x["val_loss"].idxmin()]
-    ).reset_index(drop=True)
-
-    val_loss = best_train_val['val_loss'].mean()
-    val_accuracy = best_train_val['val_accuracy'].mean()
-
+    val_macro_f1 = df_metrics['val_macro_f1'].mean()
+    val_balanced_acc = df_metrics['val_bacc'].mean()
+    val_macro_precision = df_metrics['val_macro_precision'].mean()
+    val_macro_recall = df_metrics['val_macro_recall'].mean()
+    val_accuracy = df_metrics['val_accuracy'].mean()
+    
     return {
-        'index': i_p,
-        'params': params,
-        'val_loss': val_loss,
-        'val_accuracy': val_accuracy
-    }
+    'index': i_p,
+    'params': params,
+    'val_macro_f1': val_macro_f1,
+    'val_bacc': val_balanced_acc,
+    'val_macro_precision': val_macro_precision,
+    'val_macro_recall': val_macro_recall,
+    "val_accuracy": val_accuracy
+            }       
 
 def CNN_GridSearchCV(X_train_paths, y_train_array, param_grid, build_model, random_state,
                      n_splits=5, shuffle=True, n_jobs=1, batch_size=32):
@@ -262,27 +291,19 @@ def CNN_GridSearchCV(X_train_paths, y_train_array, param_grid, build_model, rand
         dict(zip(param_grid.keys(), values))
         for values in itertools.product(*param_grid.values())
     ]
-    total_start = time.time()
+    # total_start = time.time()
     results = []
     for i, params in enumerate(param_combinations):
         result = evaluate_combination(i, params, X_train_paths, y_train_array, skf, build_model, batch_size)
         results.append(result)
         
-    total_time = time.time() - total_start
+    # total_time = time.time() - total_start
     # print(f"tot_time: {total_time:.1f}")
-    best_result = max(results, key=lambda r: r['val_accuracy'])
+    best_result = max(results, key=lambda r: r['val_macro_f1'])
     best_params = best_result['params']
-    best_accuracy = best_result['val_accuracy']
-    mean_scores = [(r['val_loss'], r['val_accuracy']) for r in results]
-    
-    params_results = pd.DataFrame([
-    {**r['params'], 
-     'val_loss': r['val_loss'], 
-     'val_accuracy': r['val_accuracy']}
-        for r in results
-        ])
+    best_accuracy = best_result['val_macro_f1']
 
-    return best_params, best_accuracy, mean_scores, params_results
+    return best_params, best_accuracy, results
 
 
 def save_params(run_logdir, name, best_params):
