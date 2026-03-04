@@ -17,7 +17,7 @@ from sklearn.metrics import confusion_matrix, classification_report, f1_score, b
 from collections import Counter
 import tensorflow as tf
 
-image_size = (32,32)
+image_size = (96,96)
 num_classes = 10
 
 class_weights = {0: np.float64(1.6402457757296467),
