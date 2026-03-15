@@ -6,15 +6,18 @@ import numpy as np
 import itertools
 import pickle
 import time
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
 from keras.callbacks import EarlyStopping
 from keras import mixed_precision
+from sklearn.metrics import confusion_matrix, classification_report, f1_score, balanced_accuracy_score, precision_score, recall_score, accuracy_score
 
 from collections import Counter
 import tensorflow as tf
 
-image_size = (32,32)
+image_size = (96, 96)
 num_classes = 10
 
 class_weights = {0: np.float64(1.6402457757296467),
@@ -73,7 +76,7 @@ def root_logdir(architecture_name):
         - Path for the logs of execution to be saved.
     
     '''
-    return os.path.join(os.curdir, "logs\\"+architecture_name)
+    return os.path.join(os.curdir, "logs/"+architecture_name)
 
 def get_run_logdir(architecture_name, it):
     '''Creates a run id by adding a timestamp to the execution path of each log to better trace each training session.
@@ -125,6 +128,22 @@ def pass_batchs_to_arrays(dset, pass_dummy=False):
 
     return X, y
 
+def load_full_dataset(paths, labels):
+    ds = tf.data.Dataset.from_tensor_slices((paths, labels))
+    ds = ds.map(preprocess_image, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.batch(1024)
+    
+    images = []
+    targets = []
+    
+    for batch_images, batch_labels in ds:
+        images.append(batch_images)
+        targets.append(batch_labels)
+        
+    X = tf.concat(images, axis=0)
+    y = tf.concat(targets, axis=0)
+    
+    return X, y
 
 # pass thru tf to convert paths to images
 def preprocess_image(file_path, label):
@@ -147,118 +166,6 @@ def preprocess_image(file_path, label):
     img = tf.image.resize(img, image_size)
     return img, tf.one_hot(label, depth=num_classes)
 
-def evaluate_combination(i_p, params, X_train, y_train, skf, build_model, batch_size=128):
-    """
-    Args:
-        i_p (int): index of the hyperparameter combination
-        params (dict): current hyperparameter values
-        X_train_paths (np.array): array of image file paths
-        y_train_array (np.array): array of corresponding labels
-        skf (StratifiedKFold): cross-validation splitter
-        build_model (function): function returning a compiled Keras model
-        batch_size (int): batch size for training
-        
-    Returns:
-        dict: {'index', 'params', 'val_loss', 'val_accuracy'}
-    """
-    
-    history_tables = []
-    
-    print(f"combination {i_p}")
-    print(f"Params: {params}")
-    start_comb = time.time()
-
-    for i, (train_i, val_i) in enumerate(skf.split(X_train, y_train)):
-        fold = f"Fold{i+1}"
-        
-        # y_train_fold = tf.one_hot(y_train[train_i], depth=num_classes)
-        train_ds = tf.data.Dataset.from_tensor_slices(
-                (X_train[train_i], y_train[train_i])
-            ).shuffle(len(train_i)).batch(batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
-
-        # y_val_fold = tf.one_hot(y_train[val_i], depth=num_classes)
-        val_ds = tf.data.Dataset.from_tensor_slices(
-            (X_train[val_i], y_train[val_i])
-        ).batch(batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
-        
-        tf.keras.backend.clear_session()
-        model = build_model(**params)
-
-        run_id, run_logdir = get_run_logdir("first_architecture", f"ip_{i_p}_{fold}")
-
-        # train
-        # print("training")
-        start_fold = time.time()
-        early_stopping = EarlyStopping(patience = 3, restore_best_weights=True)
-        history = model.fit(train_ds, 
-                            validation_data=val_ds, 
-                            epochs=15, verbose=0, 
-                            class_weight=class_weights, 
-                            callbacks = [early_stopping])
-        
-        fold_time = time.time() - start_fold
-        # print(f"[{fold}] time: {fold_time:.1f}")
-
-        history_tables.append(table_from_history(history.history, run_id))
-
-    df_history = pd.concat(history_tables)
-
-    best_train_val = df_history.groupby('run').apply(
-        lambda x: x.loc[x["val_loss"].idxmin()]
-    ).reset_index(drop=True)
-
-    val_loss = best_train_val['val_loss'].mean()
-    val_accuracy = best_train_val['val_accuracy'].mean()
-
-    return {
-        'index': i_p,
-        'params': params,
-        'val_loss': val_loss,
-        'val_accuracy': val_accuracy
-    }
-
-def CNN_GridSearchCV(X_train_paths, y_train_array, param_grid, build_model, random_state,
-                     n_splits=5, shuffle=True, n_jobs=1, batch_size=32):
-    """
-    Runs GridSearchCV for a CNN
-    
-    Args:
-        X_train_paths (np.array): array of image file paths
-        y_train_array (np.array): array of labels
-        param_grid (dict): dictionary of hyperparameter options
-        build_model (function): returns compiled model
-        random_state (int)
-        n_splits (int): K in K-Fold
-        shuffle (bool)
-        n_jobs (int): parallel jobs (-1 uses all cores)
-        batch_size (int)
-    
-    Returns:
-        best_params, best_accuracy, mean_scores
-    """
-
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=shuffle, random_state=random_state)
-
-    param_combinations = [
-        dict(zip(param_grid.keys(), values))
-        for values in itertools.product(*param_grid.values())
-    ]
-    total_start = time.time()
-    results = []
-    for i, params in enumerate(param_combinations):
-        result = evaluate_combination(i, params, X_train_paths, y_train_array, skf, build_model, batch_size)
-        results.append(result)
-        
-    total_time = time.time() - total_start
-    # print(f"tot_time: {total_time:.1f}")
-    best_result = max(results, key=lambda r: r['val_accuracy'])
-    best_params = best_result['params']
-    best_accuracy = best_result['val_accuracy']
-    mean_scores = [(r['val_loss'], r['val_accuracy']) for r in results]
-
-    return best_params, best_accuracy, mean_scores
-
-
 def save_params(run_logdir, name, best_params):
     '''Saves a dictionary in pickle format.
     
@@ -268,7 +175,7 @@ def save_params(run_logdir, name, best_params):
         - best_params (dict): dictionary to be saved.
     
     '''
-    with open(run_logdir + '\\' + name, 'wb') as f:
+    with open(run_logdir + '/' + name, 'wb') as f:
         pickle.dump(best_params, f)
         
 def load_params(run_logdir):
@@ -285,3 +192,41 @@ def load_params(run_logdir):
         loaded_params = pickle.load(f)
     
     return loaded_params 
+
+
+def compute_classification_metrics(y_true, y_pred, class_names):
+    '''Computes confusion matrix based on prediction and true labels.
+    
+    Args:
+        - y_true (np.array): true labels of a dataset.
+        - y_pred (np.array): predicted labels.
+        - class_names (list): index-ordered class names.
+        
+    Returns:
+        - cm: confusion matrix.
+        - Also prints a classification report.
+    
+    '''
+    cm = confusion_matrix(y_true, y_pred)
+    str_summary = classification_report(y_true, y_pred, target_names=class_names)
+    print(str_summary)
+    
+    # todo: manually compute other metrics
+    return cm
+
+
+def plot_conf_matrix(cm, class_names):
+    ''' Plots a confusion matrix coming from the compute_classification_metrics function
+    
+    Args:
+        - cm: confusion matrix.
+    Returns:
+        - Plot of the confusion matrix.
+        
+    '''
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", 
+                xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel("pred")
+    plt.ylabel("true")
+    plt.show()
